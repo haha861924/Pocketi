@@ -1,28 +1,22 @@
 import { describe, it, expect, beforeEach, vi } from 'vitest';
-import { renderHook, act } from '@testing-library/react';
+import { renderHook, act, waitFor } from '@testing-library/react';
 import { useMangaStore } from './useMangaStore';
 import type { CreateMangaInput } from './types';
 
-// Mock localStorage
-const localStorageMock = (() => {
-  let store: Record<string, string> = {};
-  return {
-    getItem: vi.fn((key: string) => store[key] || null),
-    setItem: vi.fn((key: string, value: string) => {
-      store[key] = value.toString();
-    }),
-    removeItem: vi.fn((key: string) => {
-      delete store[key];
-    }),
-    clear: vi.fn(() => {
-      store = {};
-    }),
-  };
-})();
+// Mock idb-keyval
+const mockStore: Record<string, unknown> = {};
+vi.mock('idb-keyval', () => ({
+  get: vi.fn((key: string) => Promise.resolve(mockStore[key] ?? undefined)),
+  set: vi.fn((key: string, value: unknown) => {
+    mockStore[key] = value;
+    return Promise.resolve();
+  }),
+}));
 
-Object.defineProperty(window, 'localStorage', {
-  value: localStorageMock,
-});
+// Mock auth — 離線模式
+vi.mock('../../lib/auth', () => ({
+  isAuthenticated: () => false,
+}));
 
 // Mock UUID
 vi.mock('uuid', () => ({
@@ -31,115 +25,157 @@ vi.mock('uuid', () => ({
 
 describe('useMangaStore', () => {
   beforeEach(() => {
-    localStorageMock.clear();
+    Object.keys(mockStore).forEach(key => delete mockStore[key]);
     vi.clearAllMocks();
+    localStorage.clear();
   });
 
-  it('應該從 LocalStorage 載入資料', () => {
-    const mockData = {
+  it('初始狀態為空陣列，載入完成後 isLoading 為 false', async () => {
+    const { result } = renderHook(() => useMangaStore());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.mangas).toHaveLength(0);
+  });
+
+  it('應該從 IndexedDB 載入資料', async () => {
+    mockStore['pocketit_manga_v1'] = {
       version: '1.0.0',
-      mangas: [{ id: '1', title: 'Test Manga', status: 'reading' }]
+      mangas: [
+        { id: '1', title: 'Test Manga', status: 'reading', readChapters: 5, tags: [], createdAt: '2026-01-01', updatedAt: '2026-01-01' }
+      ],
     };
-    // 改用 setItem 設定資料，而不是覆寫 mock 的回傳值
-    localStorage.setItem('pocketit_manga_v1', JSON.stringify(mockData));
 
     const { result } = renderHook(() => useMangaStore());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
 
     expect(result.current.mangas).toHaveLength(1);
     expect(result.current.mangas[0].title).toBe('Test Manga');
   });
 
-  it('應該成功新增漫畫', () => {
+  it('應該從 localStorage 遷移資料到 IndexedDB', async () => {
+    const mockData = {
+      version: '1.0.0',
+      mangas: [
+        { id: '1', title: 'Migrated Manga', status: 'want-to-read', readChapters: 0, tags: [], createdAt: '2026-01-01', updatedAt: '2026-01-01' }
+      ],
+    };
+    localStorage.setItem('pocketit_manga_v1', JSON.stringify(mockData));
+
     const { result } = renderHook(() => useMangaStore());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
+
+    expect(result.current.mangas).toHaveLength(1);
+    expect(result.current.mangas[0].title).toBe('Migrated Manga');
+    // localStorage 應被清除
+    expect(localStorage.getItem('pocketit_manga_v1')).toBeNull();
+  });
+
+  it('應該成功新增漫畫', async () => {
+    const { result } = renderHook(() => useMangaStore());
+
+    await waitFor(() => {
+      expect(result.current.isLoading).toBe(false);
+    });
 
     const input: CreateMangaInput = {
       title: 'New Manga',
       status: 'want-to-read',
       readChapters: 0,
-      tags: []
+      tags: ['action'],
     };
 
-    act(() => {
-      result.current.addManga(input);
+    await act(async () => {
+      await result.current.addManga(input);
     });
 
     expect(result.current.mangas).toHaveLength(1);
     expect(result.current.mangas[0].title).toBe('New Manga');
     expect(result.current.mangas[0].id).toBe('test-uuid-1234');
-    expect(localStorageMock.setItem).toHaveBeenCalled();
+    expect(result.current.mangas[0].tags).toEqual(['action']);
   });
 
-  it('應該成功更新漫畫', () => {
+  it('應該成功更新漫畫', async () => {
     const { result } = renderHook(() => useMangaStore());
 
-    // 先新增
-    act(() => {
-      result.current.addManga({
-        title: 'Old Title',
-        status: 'want-to-read',
-        readChapters: 0
-      });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.addManga({ title: 'Old Title', status: 'want-to-read', readChapters: 0 });
     });
 
-    // 更新
-    act(() => {
-      result.current.updateManga('test-uuid-1234', {
-        title: 'New Title',
-        readChapters: 5
-      });
+    await act(async () => {
+      await result.current.updateManga('test-uuid-1234', { title: 'New Title', readChapters: 5 });
     });
 
     expect(result.current.mangas[0].title).toBe('New Title');
     expect(result.current.mangas[0].readChapters).toBe(5);
   });
 
-  it('應該在進度達到 100% 時自動更新狀態為已完成', () => {
+  it('應該在進度達到 100% 時自動更新狀態為已完成', async () => {
     const { result } = renderHook(() => useMangaStore());
 
-    act(() => {
-      result.current.addManga({
-        title: 'Test',
-        status: 'reading',
-        totalChapters: 10,
-        readChapters: 5
-      });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.addManga({ title: 'Test', status: 'reading', totalChapters: 10, readChapters: 5 });
     });
 
-    act(() => {
-      result.current.updateManga('test-uuid-1234', {
-        readChapters: 10
-      });
+    await act(async () => {
+      await result.current.updateManga('test-uuid-1234', { readChapters: 10 });
     });
 
     expect(result.current.mangas[0].status).toBe('completed');
   });
 
-  it('應該成功刪除漫畫', () => {
+  it('應該成功刪除漫畫', async () => {
     const { result } = renderHook(() => useMangaStore());
 
-    act(() => {
-      result.current.addManga({ title: 'Delete Me', status: 'dropped', readChapters: 0 });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    await act(async () => {
+      await result.current.addManga({ title: 'Delete Me', status: 'dropped', readChapters: 0 });
     });
 
     expect(result.current.mangas).toHaveLength(1);
 
-    act(() => {
-      result.current.deleteManga('test-uuid-1234');
+    await act(async () => {
+      await result.current.deleteManga('test-uuid-1234');
     });
 
     expect(result.current.mangas).toHaveLength(0);
   });
 
-  it('應該依條件篩選漫畫', () => {
+  it('應該正確篩選漫畫', async () => {
     const { result } = renderHook(() => useMangaStore());
 
-    act(() => {
-      // 模擬 uuid 回傳不同值
-      // 這裡簡單測試邏輯, 實際整合測試可能需要更複雜的 mock
-      // 由於 mock v4 固定回傳, 無法測試多個不同 ID 的情況,
-      // 暫時僅測試 addManga 後的 filter 邏輯 (需調整 mock 或測試策略)
-      // 為簡化, 假設 filterMangas 邏輯正確, 這裡只測試函數存在
-      expect(result.current.filterMangas).toBeDefined();
-    });
+    await waitFor(() => expect(result.current.isLoading).toBe(false));
+
+    expect(result.current.filterMangas({ searchQuery: 'test' })).toEqual([]);
+    expect(result.current.filterMangas({ status: 'reading' })).toEqual([]);
+    expect(result.current.filterMangas({})).toEqual([]);
+  });
+
+  it('應該正確排序漫畫', () => {
+    const { result } = renderHook(() => useMangaStore());
+
+    const mangas = [
+      { id: '1', title: 'B Manga', status: 'reading' as const, readChapters: 0, tags: [], rating: 8, createdAt: '2026-01-02', updatedAt: '2026-01-02' },
+      { id: '2', title: 'A Manga', status: 'reading' as const, readChapters: 0, tags: [], rating: 5, createdAt: '2026-01-01', updatedAt: '2026-01-01' },
+    ];
+
+    const byTitle = result.current.sortMangas(mangas, 'title-asc');
+    expect(byTitle[0].title).toBe('A Manga');
+
+    const byRating = result.current.sortMangas(mangas, 'rating-desc');
+    expect(byRating[0].rating).toBe(8);
   });
 });
