@@ -22,6 +22,8 @@ export function LandingPage() {
   const handleFeatureClick = (title: string) => {
     if (title === '漫畫收藏') {
       navigate('/manga');
+    } else if (title === '電影記錄') {
+      navigate('/movie');
     } else {
       setShowComingSoon(true);
       setTimeout(() => setShowComingSoon(false), 3000);

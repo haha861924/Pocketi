@@ -4,6 +4,10 @@ import { useMangaStore } from './useMangaStore';
 import { MangaCard } from './MangaCard';
 import { MangaForm } from './MangaForm';
 import { MangaDetail } from './MangaDetail';
+import { SearchPanel } from '../search/SearchPanel';
+import { isAuthenticated } from '../../lib/auth';
+import { logout } from '../../lib/auth';
+import { api } from '../../lib/api';
 import type {
   Manga,
   MangaFilterOptions,
@@ -26,9 +30,12 @@ export const MangaList: React.FC = () => {
     sortMangas
   } = useMangaStore();
 
+  const loggedIn = isAuthenticated();
+
   // 狀態管理
   const [isFormOpen, setIsFormOpen] = useState(false);
   const [editingManga, setEditingManga] = useState<Manga | undefined>(undefined);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
 
   // 篩選狀態
   const [searchQuery, setSearchQuery] = useState('');
@@ -67,6 +74,31 @@ export const MangaList: React.FC = () => {
     } else {
       addManga(data);
     }
+  };
+
+  // 處理從搜尋結果加入收藏
+  const handleSearchAdd = async (result: any) => {
+    if (loggedIn) {
+      await api.post('/api/collections', {
+        type: result.type,
+        title: result.title,
+        author: result.author,
+        external_id: result.external_id,
+        thumbnail_url: result.thumbnail,
+        status: 'want',
+        tags: [],
+      });
+      // 重新載入 (簡單方式: 重新整理頁面)
+      window.location.reload();
+    } else {
+      addManga({
+        title: result.title,
+        author: result.author,
+        status: 'want-to-read',
+        tags: [],
+      });
+    }
+    setIsSearchOpen(false);
   };
 
   // 處理卡片點擊
@@ -109,12 +141,38 @@ export const MangaList: React.FC = () => {
             共 {mangas.length} 本漫畫 • {displayedMangas.length} 個結果
           </p>
         </div>
-        <button
-          onClick={handleCreate}
-          className="pixel-button pixel-button-primary"
-        >
-          + 新增漫畫
-        </button>
+        <div className="flex gap-2 items-center">
+          {loggedIn && (
+            <>
+              <button
+                onClick={() => setIsSearchOpen(true)}
+                className="pixel-button pixel-button-primary"
+              >
+                搜尋新增
+              </button>
+              <button
+                onClick={logout}
+                className="pixel-button text-sm"
+              >
+                登出
+              </button>
+            </>
+          )}
+          {!loggedIn && (
+            <button
+              onClick={() => navigate('/login')}
+              className="pixel-button text-sm"
+            >
+              登入
+            </button>
+          )}
+          <button
+            onClick={handleCreate}
+            className="pixel-button pixel-button-primary"
+          >
+            + 新增漫畫
+          </button>
+        </div>
       </div>
 
       {/* 篩選工具列 */}
@@ -209,6 +267,14 @@ export const MangaList: React.FC = () => {
         onClose={() => setViewingManga(undefined)}
         onEdit={handleEdit}
         onDelete={handleDelete}
+      />
+
+      {/* 搜尋面板 */}
+      <SearchPanel
+        isOpen={isSearchOpen}
+        onClose={() => setIsSearchOpen(false)}
+        onAdd={handleSearchAdd}
+        defaultType="manga"
       />
     </div>
   );
